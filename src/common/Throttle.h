@@ -392,15 +392,20 @@ public:
     Mutex::Locker lock(m_lock);
     if (!m_blockers.empty()) {
       // Keep the order of requests, add item after previous blocked requests.
+      // blockers 相当于是在排队
+      // 如果不是 blockers 不是空的，那就直接把后面的请求加入到 blockers 里，等待调度
       wait = true;
     } else {
+      // 如果是空的，那么直接从桶中获取令牌
       got = m_throttle.get(c);
       if (got < c) {
+        // 如果令牌数量不够，那么也要加入到 blockers 里，等待调度
         // Not enough tokens, add a blocker for it.
         wait = true;
       }
     }
 
+    // 加入到 blockers 里：因为已经从桶里获取过令牌了，所以这里要减去刚刚获取到的数量，避免在调度时重复获取令牌
     if (wait)
       add_blocker<T, I, MF>(c - got, handler, item, flag);
 
