@@ -18,6 +18,7 @@
 #include "include/rados/librados.hpp"
 #include "include/rados/rados_types.hpp"
 
+#include "acconfig.h"
 #ifdef WITH_LIBRADOSSTRIPER
  #include "include/radosstriper/libradosstriper.hpp"
  using namespace libradosstriper;
@@ -3404,7 +3405,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (max_backlog)
       lg.max_backlog = max_backlog;
     if (target_throughput)
-      lg.target_throughput = target_throughput << 20;
+      lg.target_throughput = target_throughput;
     if (read_percent >= 0)
       lg.read_percent = read_percent;
     if (num_objs)

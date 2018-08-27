@@ -7006,7 +7006,7 @@ std::vector<Option> get_mds_options() {
     .set_description(""),
 
     Option("mds_max_export_size", Option::TYPE_SIZE, Option::LEVEL_DEV)
-    .set_default(1_G)
+    .set_default(20_M)
     .set_description(""),
 
     Option("mds_kill_export_at", Option::TYPE_INT, Option::LEVEL_DEV)
@@ -7187,6 +7187,10 @@ std::vector<Option> get_mds_options() {
     Option("mds_request_load_average_decay_rate", Option::TYPE_FLOAT, Option::LEVEL_ADVANCED)
     .set_default(60)
     .set_description("rate of decay in seconds for calculating request load average"),
+
+    Option("mds_cap_revoke_eviction_timeout", Option::TYPE_FLOAT, Option::LEVEL_ADVANCED)
+     .set_default(0)
+     .set_description("number of seconds after which clients which have not responded to cap revoke messages by the MDS are evicted."),
   });
 }
 
