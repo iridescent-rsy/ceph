@@ -81,7 +81,7 @@ int MonClient::get_monmap()
   ldout(cct, 10) << __func__ << dendl;
   Mutex::Locker l(monc_lock);
   
-  _sub_want("monmap", 0, 0);
+  sub.want("monmap", 0, 0);
   if (!_opened())
     _reopen_session();
 
@@ -95,7 +95,7 @@ int MonClient::get_monmap()
 int MonClient::get_monmap_and_config()
 {
   ldout(cct, 10) << __func__ << dendl;
-  assert(!messenger);
+  ceph_assert(!messenger);
 
   int tries = 10;
 
@@ -112,7 +112,7 @@ int MonClient::get_monmap_and_config()
 
   messenger = Messenger::create_client_messenger(
     cct, "temp_mon_client");
-  assert(messenger);
+  ceph_assert(messenger);
   messenger->add_dispatcher_head(this);
   messenger->start();
 
@@ -358,7 +358,7 @@ void MonClient::handle_monmap(MMonMap *m)
   monmap.print(*_dout);
   *_dout << dendl;
 
-  _sub_got("monmap", monmap.get_epoch());
+  sub.got("monmap", monmap.get_epoch());
 
   if (!monmap.get_addr_name(peer, cur_mon)) {
     ldout(cct, 10) << "mon." << cur_mon << " went away" << dendl;
@@ -484,8 +484,8 @@ int MonClient::authenticate(double timeout)
     ldout(cct, 5) << "already authenticated" << dendl;
     return 0;
   }
-  _sub_want("monmap", monmap.get_epoch() ? monmap.get_epoch() + 1 : 0, 0);
-  _sub_want("config", 0, 0);
+  sub.want("monmap", monmap.get_epoch() ? monmap.get_epoch() + 1 : 0, 0);
+  sub.want("config", 0, 0);
   if (!_opened())
     _reopen_session();
 
@@ -510,7 +510,7 @@ int MonClient::authenticate(double timeout)
     ldout(cct, 5) << __func__ << " success, global_id "
 		  << active_con->get_global_id() << dendl;
     // active_con should not have been set if there was an error
-    assert(authenticate_err == 0);
+    ceph_assert(authenticate_err == 0);
     authenticated = true;
   }
 
@@ -523,7 +523,7 @@ int MonClient::authenticate(double timeout)
 
 void MonClient::handle_auth(MAuthReply *m)
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   if (!_hunting()) {
     std::swap(active_con->get_auth(), auth);
     int ret = active_con->authenticate(m);
@@ -541,7 +541,7 @@ void MonClient::handle_auth(MAuthReply *m)
 
   // hunting
   auto found = _find_pending_con(m->get_connection());
-  assert(found != pending_cons.end());
+  ceph_assert(found != pending_cons.end());
   int auth_err = found->second.handle_auth(m, entity_name, want_keys,
 					   rotating_secrets.get());
   m->put();
@@ -557,7 +557,7 @@ void MonClient::handle_auth(MAuthReply *m)
     // the last try just failed, give up.
   } else {
     auto& mc = found->second;
-    assert(mc.have_session());
+    ceph_assert(mc.have_session());
     active_con.reset(new MonConnection(std::move(mc)));
     pending_cons.clear();
   }
@@ -597,7 +597,7 @@ void MonClient::_finish_auth(int auth_err)
   // _resend_mon_commands() could _reopen_session() if the connected mon is not
   // the one the MonCommand is targeting.
   if (!auth_err && active_con) {
-    assert(auth);
+    ceph_assert(auth);
     _check_auth_tickets();
   }
   auth_cond.SignalAll();
@@ -607,7 +607,7 @@ void MonClient::_finish_auth(int auth_err)
 
 void MonClient::_send_mon_message(Message *m)
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   if (active_con) {
     auto cur_con = active_con->get_con();
     ldout(cct, 10) << "_send_mon_message to mon."
@@ -621,7 +621,7 @@ void MonClient::_send_mon_message(Message *m)
 
 void MonClient::_reopen_session(int rank)
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   ldout(cct, 10) << __func__ << " rank " << rank << dendl;
 
   active_con.reset();
@@ -652,14 +652,9 @@ void MonClient::_reopen_session(int rank)
     c.second.start(monmap.get_epoch(), entity_name, *auth_supported);
   }
 
-  for (map<string,ceph_mon_subscribe_item>::iterator p = sub_sent.begin();
-       p != sub_sent.end();
-       ++p) {
-    if (sub_new.count(p->first) == 0)
-      sub_new[p->first] = p->second;
-  }
-  if (!sub_new.empty())
+  if (sub.reload()) {
     _renew_subs();
+  }
 }
 
 MonConnection& MonClient::_add_conn(unsigned rank, uint64_t global_id)
@@ -729,7 +724,7 @@ bool MonClient::ms_handle_reset(Connection *con)
 
 bool MonClient::_opened() const
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   return active_con || _hunting();
 }
 
@@ -740,7 +735,7 @@ bool MonClient::_hunting() const
 
 void MonClient::_start_hunting()
 {
-  assert(!_hunting());
+  ceph_assert(!_hunting());
   // adjust timeouts if necessary
   if (!had_a_connection)
     return;
@@ -754,9 +749,9 @@ void MonClient::_start_hunting()
 
 void MonClient::_finish_hunting()
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   // the pending conns have been cleaned.
-  assert(!_hunting());
+  ceph_assert(!_hunting());
   if (active_con) {
     auto con = active_con->get_con();
     ldout(cct, 1) << "found mon."
@@ -788,12 +783,12 @@ void MonClient::tick()
     utime_t now = ceph_clock_now();
     auto cur_con = active_con->get_con();
     if (!cur_con->has_feature(CEPH_FEATURE_MON_STATEFUL_SUB)) {
-      ldout(cct, 10) << "renew subs? (now: " << now
-		     << "; renew after: " << sub_renew_after << ") -- "
-		     << (now > sub_renew_after ? "yes" : "no")
+      const bool maybe_renew = sub.need_renew();
+      ldout(cct, 10) << "renew subs? -- " << (maybe_renew ? "yes" : "no")
 		     << dendl;
-      if (now > sub_renew_after)
+      if (maybe_renew) {
 	_renew_subs();
+      }
     }
 
     cur_con->send_keepalive();
@@ -841,8 +836,8 @@ void MonClient::schedule_tick()
 
 void MonClient::_renew_subs()
 {
-  assert(monc_lock.is_locked());
-  if (sub_new.empty()) {
+  ceph_assert(monc_lock.is_locked());
+  if (!sub.have_new()) {
     ldout(cct, 10) << __func__ << " - empty" << dendl;
     return;
   }
@@ -851,39 +846,22 @@ void MonClient::_renew_subs()
   if (!_opened())
     _reopen_session();
   else {
-    if (sub_renew_sent == utime_t())
-      sub_renew_sent = ceph_clock_now();
-
     MMonSubscribe *m = new MMonSubscribe;
-    m->what = sub_new;
+    m->what = sub.get_subs();
     _send_mon_message(m);
-
-    // update sub_sent with sub_new
-    sub_new.insert(sub_sent.begin(), sub_sent.end());
-    std::swap(sub_new, sub_sent);
-    sub_new.clear();
+    sub.renewed();
   }
 }
 
 void MonClient::handle_subscribe_ack(MMonSubscribeAck *m)
 {
-  if (sub_renew_sent != utime_t()) {
-    // NOTE: this is only needed for legacy (infernalis or older)
-    // mons; see tick().
-    sub_renew_after = sub_renew_sent;
-    sub_renew_after += m->interval / 2.0;
-    ldout(cct, 10) << __func__ << " sent " << sub_renew_sent << " renew after " << sub_renew_after << dendl;
-    sub_renew_sent = utime_t();
-  } else {
-    ldout(cct, 10) << __func__ << " sent " << sub_renew_sent << ", ignoring" << dendl;
-  }
-
+  sub.acked(m->interval);
   m->put();
 }
 
 int MonClient::_check_auth_tickets()
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   if (active_con && auth) {
     if (auth->need_tickets()) {
       ldout(cct, 10) << __func__ << " getting new tickets!" << dendl;
@@ -901,7 +879,7 @@ int MonClient::_check_auth_tickets()
 
 int MonClient::_check_auth_rotating()
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   if (!rotating_secrets ||
       !auth_principal_needs_rotating_keys(entity_name)) {
     ldout(cct, 20) << "_check_auth_rotating not needed by " << entity_name << dendl;
@@ -956,7 +934,7 @@ int MonClient::wait_auth_rotating(double timeout)
   until += timeout;
 
   // Must be initialized
-  assert(auth != nullptr);
+  ceph_assert(auth != nullptr);
 
   if (auth->get_protocol() == CEPH_AUTH_NONE)
     return 0;
@@ -1063,7 +1041,7 @@ void MonClient::handle_mon_command_ack(MMonCommandAck *ack)
 
 int MonClient::_cancel_mon_command(uint64_t tid)
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
 
   map<ceph_tid_t, MonCommand*>::iterator it = mon_commands.find(tid);
   if (it == mon_commands.end()) {
@@ -1173,7 +1151,7 @@ void MonClient::get_version(string map, version_t *newest, version_t *oldest, Co
 
 void MonClient::handle_get_version_reply(MMonGetVersionReply* m)
 {
-  assert(monc_lock.is_locked());
+  ceph_assert(monc_lock.is_locked());
   map<ceph_tid_t, version_req_d*>::iterator iter = version_requests.find(m->handle);
   if (iter == version_requests.end()) {
     ldout(cct, 0) << __func__ << " version request with handle " << m->handle
@@ -1237,7 +1215,7 @@ void MonConnection::start(epoch_t epoch,
   con->send_keepalive();
 
   auto m = new MAuth;
-  m->protocol = 0;
+  m->protocol = CEPH_AUTH_UNKNOWN;
   m->monmap_epoch = epoch;
   __u8 struct_v = 1;
   encode(struct_v, m->auth_payload);
@@ -1307,7 +1285,7 @@ int MonConnection::_negotiate(MAuthReply *m,
 
 int MonConnection::authenticate(MAuthReply *m)
 {
-  assert(auth);
+  ceph_assert(auth);
   if (!m->global_id) {
     ldout(cct, 1) << "peer sent an invalid global_id" << dendl;
   }
@@ -1331,7 +1309,7 @@ int MonConnection::authenticate(MAuthReply *m)
 }
 
 void MonClient::register_config_callback(md_config_t::config_callback fn) {
-  assert(!config_cb);
+  ceph_assert(!config_cb);
   config_cb = fn;
 }
 
