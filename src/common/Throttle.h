@@ -338,16 +338,58 @@ class TokenBucketThrottle {
   struct Bucket {
     CephContext *cct;
     const std::string name;
-    std::atomic<uint64_t> remain = { 0 }, max = { 0 };
 
-    Bucket(CephContext *cct, const std::string& n, uint64_t m)
-      : cct(cct), name(n),
-	remain(m), max(m)
-    {
-    }
+    // minimum of the filling period.
+    static const uint64_t tick_min = 50;
+
+    // CIR: the rate tokens generated
+    uint64_t committed_information_rate = 0;
+    // CBS: the size of the bucket(also means the burst limit size)
+    uint64_t committed_burst_size = 0;
+    // tokens reamin in the bucket after get()
+    uint64_t remain = 0;
+
+    // tokens filling period, its unit is millisecond.
+    uint64_t tick = tick_min;
+
+    /**
+     * These variables are used to calculate how many tokens need to be filled
+     * within each tick.
+     *
+     * In actual use, the tokens per tick may not be an integer, so take the its
+     * integer part here(tokens_per_tick) and spread the remainder(divide_left)
+     * into each tick to ensure that a set number of tokens can be transmitted
+     * per second.
+     *
+     * For exmple, we set the value of CIR to be 950, means 950 iops(or bps).
+     * In this case, the actual period is 1000 / 950 = 1.052, too small for
+     * the SafeTimer. So the tick should set to be 50(tick_min), 20 ticks in
+     * one second.
+     * The tokens filled in bucket per tick is 950 / 20 = 47.5, not an integer.
+     * We take the 47 as tokens_per_tick, and there are 950 - (47 * 20) = 10
+     * tokens left. To fix this, we spread the 10 tokens into 10 ticks.
+     *
+     * As a result, the tokens filled in one second will shown as this:
+     * tick    | 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|
+     * tokens  |48|48|48|48|48|48|48|48|48|48|47|47|47|47|47|47|47|47|47|47|
+     */
+    uint64_t ticks_per_second = 0;
+    uint64_t tokens_per_tick = 0;
+    uint64_t divide_left = 0;
+
+    Bucket(CephContext *cct,
+           const std::string& name,
+           uint64_t average,
+           uint64_t burst)
+    : cct(cct), name(name),
+      committed_information_rate(average),
+      committed_burst_size(burst) {}
 
     uint64_t get(uint64_t c);
-    uint64_t put(uint64_t c);
+    uint64_t put();
+    // set the committed_information_rate
+    bool set_average(uint64_t c);
+    // set the committed_burst_size
     void set_max(uint64_t m);
   };
 
@@ -368,9 +410,12 @@ class TokenBucketThrottle {
   list<Blocker> m_blockers;
   Mutex m_lock;
 
+  // period for the bucket filling tokens, its unit is seconds.
+  double m_schedule_tick = 1.0;
+
 public:
   TokenBucketThrottle(CephContext *cct, uint64_t capacity, uint64_t avg,
-  		    SafeTimer *timer, Mutex *timer_lock);
+                      SafeTimer *timer, Mutex *timer_lock);
   
   ~TokenBucketThrottle();
 
@@ -384,7 +429,7 @@ public:
   
   template <typename T, typename I, void(T::*MF)(int, I*, uint64_t)>
   bool get(uint64_t c, T *handler, I *item, uint64_t flag) {
-    if (0 == m_throttle.max)
+    if (0 == m_throttle.committed_burst_size)
       return false;
   
     bool wait = false;

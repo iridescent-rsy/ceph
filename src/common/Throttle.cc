@@ -651,7 +651,7 @@ void OrderedThrottle::complete_pending_ops(UNIQUE_LOCK_T(m_lock)& l) {
 }
 
 uint64_t TokenBucketThrottle::Bucket::get(uint64_t c) {
-  if (0 == max) {
+  if (0 == committed_information_rate) {
     return 0;
   }
 
@@ -668,26 +668,73 @@ uint64_t TokenBucketThrottle::Bucket::get(uint64_t c) {
   return got;
 }
 
-uint64_t TokenBucketThrottle::Bucket::put(uint64_t c) {
-  if (0 == max) {
+uint64_t TokenBucketThrottle::Bucket::put() {
+  if (0 == committed_information_rate) {
     return 0;
   }
-  if (c) {
-    // put c tokens into bucket
-    uint64_t current = remain;
-    if ((current + c) <= (uint64_t)max) {
-      remain += c;
-    } else {
-      remain = (uint64_t)max;
+
+  uint64_t c = tokens_per_tick;
+  uint64_t max = committed_burst_size;
+
+  // if Burst is disabled, the maximum is tokens_per_tick.
+  if (0 == max) {
+    max = tokens_per_tick;
+  }
+
+  // for the number(CIR) cannot be divisible
+  if (0 == divide_left) {
+    if (0 == ticks_per_second) {
+      ticks_per_second = 1000 / tick;
+      divide_left = committed_information_rate % ticks_per_second;
     }
+    ticks_per_second--;
+  } else {
+    divide_left--;
+    ticks_per_second--;
+    c++;
+    max++;
+  }
+
+  // put tokens into bucket
+  if (remain + c > max) {
+    remain = max;
+  } else {
+    remain += c;
   }
   return remain;
 }
 
+bool TokenBucketThrottle::Bucket::set_average(uint64_t c) {
+  if (0 == c) {
+    return false;
+  }
+  // calc the tick(ms), don't less than the minimum.
+  tick = 1000 / c;
+  if (tick < tick_min) {
+    tick = tick_min;
+  }
+
+  // tokens to put into the bucket every tick.
+  tokens_per_tick = c * tick / 1000;
+
+  // this is for the number(CIR) can not be divisible.
+  ticks_per_second = 1000 / tick;
+  divide_left = c % ticks_per_second;
+
+  // zero means Bursting IO is disabled.
+  if (0 == committed_burst_size) {
+    committed_burst_size = tokens_per_tick;
+    remain = tokens_per_tick;
+  } else {
+    remain = committed_burst_size;
+  }
+
+  committed_information_rate = c;
+  return true;
+}
+
 void TokenBucketThrottle::Bucket::set_max(uint64_t m) {
-  if (remain > m || max == 0)
-    remain = m;
-  max = m;
+  committed_burst_size = m;
 }
 
 TokenBucketThrottle::TokenBucketThrottle(
@@ -696,16 +743,12 @@ TokenBucketThrottle::TokenBucketThrottle(
     uint64_t avg,
     SafeTimer *timer,
     Mutex *timer_lock)
-  : m_cct(cct), m_throttle(m_cct, "token_bucket_throttle", capacity),
+  : m_cct(cct), m_throttle(m_cct, "token_bucket_throttle", avg, capacity),
     m_avg(avg), m_timer(timer), m_timer_lock(timer_lock),
     m_lock("token_bucket_throttle_lock")
-{
-  std::lock_guard<Mutex> timer_locker(*m_timer_lock);
-  schedule_timer();
-}
+{}
 
-TokenBucketThrottle::~TokenBucketThrottle()
-{
+TokenBucketThrottle::~TokenBucketThrottle() {
   // cancel the timer events.
   {
     std::lock_guard<Mutex> timer_locker(*m_timer_lock);
@@ -729,27 +772,42 @@ void TokenBucketThrottle::set_max(uint64_t m) {
 }
 
 void TokenBucketThrottle::set_average(uint64_t avg) {
-  m_avg = avg;
+  bool restart = false;
+  {
+    std::lock_guard<Mutex> lock(m_lock);
+    m_avg = avg;
+    if (m_throttle.set_average(avg)) {
+      restart = true;
+      // turn millisecond to second
+      m_schedule_tick = m_throttle.tick / 1000.0;
+    }
+  }
+
+  // The schedule period will be changed when the CIR is set.
+  if(restart) {
+    std::lock_guard<Mutex> timer_locker(*m_timer_lock);
+    cancel_timer();
+    schedule_timer();
+  }
 }
 
 void TokenBucketThrottle::add_tokens() {
   list<Blocker> tmp_blockers;
   {
-    // put m_avg tokens into bucket.
     std::lock_guard<Mutex> lock(m_lock);
-    m_throttle.put(m_avg);
+    m_throttle.put();
     // check the m_blockers from head to tail, if blocker can get
     // enough tokens, let it go.
     while (!m_blockers.empty()) {
       Blocker blocker = m_blockers.front();
       uint64_t got = m_throttle.get(blocker.tokens_requested);
       if (got == blocker.tokens_requested) {
-	// got enough tokens for front.
-	tmp_blockers.splice(tmp_blockers.end(), m_blockers, m_blockers.begin());
+        // got enough tokens for front.
+        tmp_blockers.splice(tmp_blockers.end(), m_blockers, m_blockers.begin());
       } else {
-	// there is no more tokens.
-	blocker.tokens_requested -= got;
-	break;
+        // there is no more tokens.
+        blocker.tokens_requested -= got;
+        break;
       }
     }
   }
@@ -760,14 +818,13 @@ void TokenBucketThrottle::add_tokens() {
 }
 
 void TokenBucketThrottle::schedule_timer() {
-  add_tokens();
-
   m_token_ctx = new FunctionContext(
       [this](int r) {
         schedule_timer();
       });
+  m_timer->add_event_after(m_schedule_tick, m_token_ctx);
 
-  m_timer->add_event_after(1, m_token_ctx);
+  add_tokens();
 }
 
 void TokenBucketThrottle::cancel_timer() {
