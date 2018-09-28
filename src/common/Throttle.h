@@ -332,25 +332,38 @@ private:
   uint32_t waiters = 0;
 };
 
+struct Bucket {
+  CephContext *cct;
+  const std::string name;
+
+  uint64_t max = 0;
+  uint64_t remain = 0;
+
+  Bucket(CephContext *cct, const std::string &name, uint64_t max)
+    : cct(cct), name(name), max(max) {}
+
+  /**
+   * Get tokens from Bucket
+   * @param c the value that we want to take
+   * @return actually got
+   */
+  uint64_t get(uint64_t c);
+
+  /**
+   * Put tokens into Bucket
+   * @param c the value that we want to put
+   * @return actually put
+   */
+  uint64_t put(uint64_t c);
+
+  /**
+   * Set the Bucket size
+   * @param m bucket size
+   */
+  void set_max(uint64_t m);
+};
 
 class TokenBucketThrottle {
-
-  struct Bucket {
-    CephContext *cct;
-    const std::string name;
-    std::atomic<uint64_t> remain = { 0 }, max = { 0 };
-
-    Bucket(CephContext *cct, const std::string& n, uint64_t m)
-      : cct(cct), name(n),
-	remain(m), max(m)
-    {
-    }
-
-    uint64_t get(uint64_t c);
-    uint64_t put(uint64_t c);
-    void set_max(uint64_t m);
-  };
-
   struct Blocker {
     uint64_t tokens_requested;
     Context *ctx;
@@ -368,9 +381,41 @@ class TokenBucketThrottle {
   list<Blocker> m_blockers;
   Mutex m_lock;
 
+  // minimum of the filling period.
+  static const uint64_t m_tick_min = 50;
+  // tokens filling period, its unit is millisecond.
+  uint64_t m_tick = 0;
+  /**
+   * These variables are used to calculate how many tokens need to be filled
+   * within each tick.
+   *
+   * In actual use, the tokens per tick may not be an integer, so take its
+   * integer part(m_tokens_per_tick) and spread the remainder(m_divide_left)
+   * into each tick to ensure that a set number of tokens can be transmitted
+   * per second.
+   *
+   * For example, we set the value of rate to be 950, means 950 iops(or bps).
+   * In this case, the actual period is 1000 / 950 = 1.052, too small for
+   * the SafeTimer. So the tick should set to be 50(m_tick_min), 20 ticks in
+   * one second.
+   * The tokens filled in bucket per tick is 950 / 20 = 47.5, not an integer.
+   * We take the 47 as m_tokens_per_tick, and there are 950 - (47 * 20) = 10
+   * tokens left. To fix this, we spread the remaining 10 tokens into 10 ticks.
+   *
+   * As a result, the tokens filled in one second will shown as this:
+   * tick    | 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|
+   * tokens  |48|48|48|48|48|48|48|48|48|48|47|47|47|47|47|47|47|47|47|47|
+   */
+  uint64_t m_ticks_per_second = 0;
+  uint64_t m_tokens_per_tick = 0;
+  uint64_t m_divide_left = 0;
+
+  // period for the bucket filling tokens, its unit is seconds.
+  double m_schedule_tick = 1.0;
+
 public:
   TokenBucketThrottle(CephContext *cct, uint64_t capacity, uint64_t avg,
-  		    SafeTimer *timer, Mutex *timer_lock);
+                      SafeTimer *timer, Mutex *timer_lock);
   
   ~TokenBucketThrottle();
 
@@ -384,7 +429,7 @@ public:
   
   template <typename T, typename I, void(T::*MF)(int, I*, uint64_t)>
   bool get(uint64_t c, T *handler, I *item, uint64_t flag) {
-    if (0 == m_throttle.max)
+    if (0 == m_avg)
       return false;
   
     bool wait = false;
@@ -411,6 +456,7 @@ public:
   void set_average(uint64_t avg);
 
 private:
+  uint64_t tokens_this_tick();
   void add_tokens();
   void schedule_timer();
   void cancel_timer();
