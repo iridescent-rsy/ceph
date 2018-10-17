@@ -382,7 +382,7 @@ class TokenBucketThrottle {
   Mutex m_lock;
 
   // minimum of the filling period.
-  static const uint64_t m_tick_min = 50;
+  uint64_t m_tick_min = 50;
   // tokens filling period, its unit is millisecond.
   uint64_t m_tick = 0;
   /**
@@ -454,6 +454,7 @@ public:
   
   void set_max(uint64_t m);
   void set_average(uint64_t avg);
+  void set_schedule_tick_min(uint64_t tick);
 
 private:
   uint64_t tokens_this_tick();

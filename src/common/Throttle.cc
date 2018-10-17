@@ -790,6 +790,13 @@ void TokenBucketThrottle::set_average(uint64_t avg) {
   }
 }
 
+void TokenBucketThrottle::set_schedule_tick_min(uint64_t tick) {
+  std::lock_guard<Mutex> lock(m_lock);
+  if (tick != 0) {
+    m_tick_min = tick;
+  }
+}
+
 void TokenBucketThrottle::add_tokens() {
   list<Blocker> tmp_blockers;
   {
